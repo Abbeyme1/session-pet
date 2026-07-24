@@ -1,0 +1,821 @@
+<title>Session Pet — Visual Prototype</title>
+<style>
+  /* Monochrome neutrals (true grey/black, no hue bias) — the 4 state colors
+     are the only color in the system, and they read as "bright details"
+     precisely because nothing else here competes with them. Dark is the
+     primary/considered treatment (developer-dark-mode aesthetic); light is
+     kept correct but secondary. */
+  :root {
+    --moss: #5b8c5a;
+    --leaf: #6dae45;
+    --amber: #e0a930;
+    --clay: #9c6b4f;
+
+    --bg: #f6f6f6;
+    --surface: #ffffff;
+    --surface-2: #ececec;
+    --border: #e0e0e0;
+    --ink: #151515;
+    --muted: #6c6c6c;
+    --shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.15);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0a0b;
+      --surface: #17181a;
+      --surface-2: #1e1f21;
+      --border: rgba(255, 255, 255, 0.08);
+      --ink: #f2f2f2;
+      --muted: #8d8d90;
+      --shadow: 0 12px 34px -10px rgba(0, 0, 0, 0.6);
+      --moss: #6fcf7a;
+      --leaf: #8ee055;
+      --amber: #ffc94d;
+      --clay: #ff8a65;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0a0b;
+    --surface: #17181a;
+    --surface-2: #1e1f21;
+    --border: rgba(255, 255, 255, 0.08);
+    --ink: #f2f2f2;
+    --muted: #8d8d90;
+    --shadow: 0 12px 34px -10px rgba(0, 0, 0, 0.6);
+    --moss: #6fcf7a;
+    --leaf: #8ee055;
+    --amber: #ffc94d;
+    --clay: #ff8a65;
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f6f6;
+    --surface: #ffffff;
+    --surface-2: #ececec;
+    --border: #e0e0e0;
+    --ink: #151515;
+    --muted: #6c6c6c;
+    --shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.15);
+    --moss: #5b8c5a;
+    --leaf: #6dae45;
+    --amber: #e0a930;
+    --clay: #9c6b4f;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+  }
+
+  .eyebrow {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+    text-wrap: balance;
+  }
+
+  .lede {
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--muted);
+    max-width: 62ch;
+    margin: 0;
+  }
+
+  section { margin-top: 56px; }
+
+  h2.section-label {
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 16px;
+  }
+
+  /* ---- Pet: robot-face icon (rounded-rect head + circle LED eyes + antenna
+     — plain geometric primitives, deliberately the simplest possible shape
+     language: rects/circles/one line, nothing organic or angled left to
+     misread). Same silhouette every state — only head fill color + eye
+     size/shape + antenna-tip color change. Ears, antenna stem, face panel
+     are fixed anatomy. Motion is tied to what's actually true right now:
+     Idle gets an occasional blink (alive, nothing happening). Working
+     pulses continuously (a real process is actively running — same logic
+     as a loading spinner). Waiting gets pupils that dart side to side
+     (searching for you) plus a radar-ping beacon off the antenna. Error
+     gets an occasional glitch/flicker (malfunction, not a frozen label). */
+  .bot-pet {
+    width: var(--pet-size, 84px);
+    height: var(--pet-size, 84px);
+    flex: none;
+    display: block;
+    overflow: visible;
+    filter: drop-shadow(0 0 calc(var(--pet-size, 84px) * 0.05) color-mix(in srgb, var(--state-color, var(--moss)) 45%, transparent));
+  }
+  .showcase-pet { --pet-size: 76px; }
+  .menubar-pet { --pet-size: 20px; }
+  .row-pet { --pet-size: 26px; flex: none; }
+
+  .bot-head { fill: var(--state-color, var(--moss)); transition: fill 0.3s ease; }
+  .bot-ear, .bot-antenna-stem { fill: #8a929b; stroke: #8a929b; }
+  .bot-panel { fill: #232a34; }
+  .bot-antenna-tip { fill: var(--state-color, var(--moss)); transition: fill 0.3s ease; }
+  .bot-eyes { display: none; }
+  .bot-eyes circle { fill: #eaf5fb; }
+  .bot-eyes-error rect { fill: #eaf5fb; }
+  .bot-eyes .bot-pupil { fill: #1c2430; transform-box: fill-box; transform-origin: center; }
+  .bot-beacon { fill: none; stroke: var(--amber); stroke-width: 1.5; opacity: 0; transform-box: fill-box; transform-origin: center; }
+  .bot-badge {
+    fill: var(--amber);
+    transform-box: fill-box;
+    transform-origin: center;
+    display: none;
+  }
+
+  .bot-pet.state-idle { --state-color: var(--moss); }
+  .bot-pet.state-idle .bot-eyes-idle { display: block; }
+  .bot-pet.state-idle .bot-eyes-idle circle { transform-box: fill-box; transform-origin: center; animation: blink 5s ease-in-out infinite; }
+
+  .bot-pet.state-working { --state-color: var(--leaf); }
+  .bot-pet.state-working .bot-eyes-working { display: block; }
+  .bot-pet.state-working .bot-eyes-working circle { transform-box: fill-box; transform-origin: center; animation: eye-pulse 1.1s ease-in-out infinite; }
+  .bot-pet.state-working .bot-eyes-working circle:nth-child(2) { animation-delay: -0.3s; }
+
+  .bot-pet.state-waiting { --state-color: var(--amber); }
+  .bot-pet.state-waiting .bot-eyes-waiting { display: block; }
+  .bot-pet.state-waiting .bot-pupil { animation: pupil-dart 1.8s ease-in-out infinite; }
+  .bot-pet.state-waiting .bot-beacon { animation: beacon-ping 1.8s ease-out infinite; }
+  .bot-pet.state-waiting { animation: glow-pulse 2.6s ease-in-out infinite; }
+  .bot-pet.state-waiting .bot-badge { display: block; animation: ping 1.8s ease-in-out infinite; }
+
+  .bot-pet.state-error { --state-color: var(--clay); filter: saturate(0.5) brightness(0.85); }
+  .bot-pet.state-error .bot-eyes-error { display: block; transform-box: fill-box; transform-origin: center; animation: error-glitch 3.2s ease-in-out infinite; }
+
+  @keyframes glow-pulse {
+    0%, 100% { filter: drop-shadow(0 0 calc(var(--pet-size, 84px) * 0.05) color-mix(in srgb, var(--amber) 50%, transparent)); }
+    50% { filter: drop-shadow(0 0 calc(var(--pet-size, 84px) * 0.11) color-mix(in srgb, var(--amber) 70%, transparent)); }
+  }
+  @keyframes ping { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.45; transform: scale(1.25); } }
+  @keyframes blink { 0%, 92%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
+  @keyframes eye-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.25); } }
+  @keyframes pupil-dart { 0%, 100% { transform: translateX(-2px); } 50% { transform: translateX(2px); } }
+  @keyframes beacon-ping { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(2.4); opacity: 0; } }
+  @keyframes error-glitch {
+    0%, 92%, 100% { transform: translateX(0); opacity: 1; }
+    93% { transform: translateX(-2px); opacity: 0.4; }
+    94% { transform: translateX(2px); opacity: 1; }
+    95% { transform: translateX(-1px); opacity: 0.6; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bot-pet, .bot-pet *, .live-dot, .dots span { animation: none !important; }
+  }
+
+  /* ---- State showcase ---- */
+  .states-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+  }
+  .state-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px 16px 18px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 14px;
+  }
+  .chip {
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 999px;
+    color: var(--chip-color);
+    background: color-mix(in srgb, var(--chip-color) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--chip-color) 38%, transparent);
+  }
+  .state-card p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+
+  /* ---- Menu bar mockup ---- */
+  .device {
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+    background: var(--surface-2);
+  }
+  .menubar {
+    height: 30px;
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 14px;
+    padding: 0 14px;
+    position: relative;
+  }
+  .glyph {
+    width: 15px; height: 15px;
+    opacity: 0.55;
+  }
+  .glyph.wifi { border-top: 2px solid var(--muted); border-radius: 50% 50% 0 0; width: 14px; height: 8px; opacity: 0.5; }
+  .glyph.battery { border: 1.5px solid var(--muted); border-radius: 3px; width: 20px; height: 10px; position: relative; opacity: 0.5; }
+  .glyph.clock { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; opacity: 0.7; white-space: nowrap; }
+  .menubar-pet-btn {
+    background: none; border: none; padding: 2px; cursor: pointer;
+    display: flex; align-items: center; border-radius: 6px;
+  }
+  .menubar-pet-btn:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+  .menubar-pet-btn:focus-visible { outline: 2px solid var(--leaf); outline-offset: 1px; }
+
+  .desktop {
+    min-height: 280px;
+    background: var(--bg);
+    position: relative;
+    padding: 0;
+  }
+
+  .dropdown {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    width: 320px;
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    backdrop-filter: blur(18px);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .dropdown-caret {
+    position: absolute;
+    top: -6px;
+    right: 22px;
+    width: 12px;
+    height: 12px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    border-top: 1px solid var(--border);
+    transform: rotate(45deg);
+  }
+  .dropdown-header {
+    padding: 10px 14px 8px;
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .row-item { border-bottom: 1px solid var(--border); }
+  .row-item:last-child { border-bottom: none; }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+  .row:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+  .row-main { flex: 1; min-width: 0; }
+  .row-name-line { display: flex; align-items: center; gap: 7px; }
+  .row-name { font-size: 13px; font-weight: 600; }
+  .row-cwd {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .row-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+  }
+  .icon-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    width: 26px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    color: var(--muted);
+  }
+  .icon-btn:hover { background: var(--surface-2); }
+  .icon-btn:focus-visible { outline: 2px solid var(--leaf); outline-offset: 1px; }
+  .icon-btn.pin.pinned { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+  .icon-btn.approve:hover { color: var(--leaf); border-color: color-mix(in srgb, var(--leaf) 50%, transparent); }
+  .icon-btn.deny:hover { color: var(--clay); border-color: color-mix(in srgb, var(--clay) 50%, transparent); }
+  .icon-btn svg { width: 13px; height: 13px; }
+  .icon-btn.chevron svg { transition: transform 0.2s ease; }
+  .icon-btn.chevron.expanded svg { transform: rotate(180deg); }
+
+  .row-detail {
+    padding: 2px 12px 12px;
+    background: var(--surface-2);
+    border-top: 1px dashed var(--border);
+  }
+  .row-detail-label {
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 10px 0 6px;
+  }
+  .row-detail-tool {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 650;
+    padding: 2px 7px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--amber) 16%, transparent);
+    color: var(--amber);
+    margin-bottom: 6px;
+  }
+  .row-detail-code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    white-space: pre;
+    color: var(--ink);
+  }
+  .row-detail-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .row-detail-log {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin: 6px 0 10px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .log-line { font-size: 11.5px; color: var(--muted); opacity: 0.65; }
+  .log-line-active {
+    color: var(--ink);
+    opacity: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .dots span {
+    width: 3px; height: 3px;
+    border-radius: 50%;
+    background: var(--leaf);
+    display: inline-block;
+    margin-left: 1px;
+    animation: dot-pulse 1.2s ease-in-out infinite;
+  }
+  .dots span:nth-child(2) { animation-delay: 0.2s; }
+  .dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes dot-pulse { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+
+  .row-detail-live {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12.5px;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--leaf);
+    animation: livedot-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes livedot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .row-detail-idle {
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .btn-text {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .btn-text svg { width: 14px; height: 14px; }
+  .btn-text.approve { color: var(--leaf); border-color: color-mix(in srgb, var(--leaf) 45%, transparent); }
+  .btn-text.approve:hover { background: color-mix(in srgb, var(--leaf) 12%, transparent); }
+  .btn-text.deny { color: var(--clay); border-color: color-mix(in srgb, var(--clay) 45%, transparent); }
+  .btn-text.deny:hover { background: color-mix(in srgb, var(--clay) 12%, transparent); }
+
+  .dropdown-footer {
+    padding: 9px 14px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--muted);
+    background: var(--surface-2);
+    border-top: 1px solid var(--border);
+  }
+  .dropdown-footer strong { color: var(--ink); font-weight: 600; }
+
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(12px);
+    background: var(--ink);
+    color: var(--bg);
+    font-size: 13px;
+    font-weight: 550;
+    padding: 9px 16px;
+    border-radius: 8px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    z-index: 10;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .caption {
+    margin-top: 14px;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  @media (max-width: 640px) {
+    .states-grid { grid-template-columns: repeat(2, 1fr); }
+    .dropdown { width: calc(100% - 28px); right: 14px; }
+  }
+</style>
+
+<div class="page">
+  <p class="eyebrow">Prototype · not the real app</p>
+  <h1>Session Pet</h1>
+  <p class="lede">A small pixel critter lives in your menu bar and reflects your live Claude Code (tmux) sessions — momentary, not persistent. Click below to try the pin and approve/deny mechanics.</p>
+
+  <section>
+    <h2 class="section-label">The four states</h2>
+    <div class="states-grid">
+      <div class="state-card">
+        <div class="pet-slot" data-pet="idle"></div>
+        <span class="chip" style="--chip-color:var(--moss)">Idle</span>
+        <p>No active session. Calm, steady — no motion.</p>
+      </div>
+      <div class="state-card">
+        <div class="pet-slot" data-pet="working"></div>
+        <span class="chip" style="--chip-color:var(--leaf)">Working</span>
+        <p>Claude is thinking or running a tool. Brighter green, focused eyes.</p>
+      </div>
+      <div class="state-card">
+        <div class="pet-slot" data-pet="waiting"></div>
+        <span class="chip" style="--chip-color:var(--amber)">Waiting</span>
+        <p>Needs your approval. Amber, wide eyes, slow glow pulse.</p>
+      </div>
+      <div class="state-card">
+        <div class="pet-slot" data-pet="error"></div>
+        <span class="chip" style="--chip-color:var(--clay)">Error</span>
+        <p>Session errored. Dim, desaturated, sad eyes — no motion.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="section-label">In the menu bar</h2>
+    <div class="device">
+      <div class="menubar">
+        <span class="glyph wifi"></span>
+        <span class="glyph battery"></span>
+        <span class="glyph clock" id="clock">Tue 9:41 PM</span>
+        <button class="menubar-pet-btn" id="menubarPet" aria-label="Toggle session dropdown">
+          <span id="aggPetSlot"></span>
+        </button>
+      </div>
+      <div class="desktop">
+        <div class="dropdown" id="dropdown">
+          <div class="dropdown-caret"></div>
+          <div class="dropdown-header">Sessions</div>
+          <div id="rows"></div>
+          <div class="dropdown-footer" id="footerNote"></div>
+        </div>
+      </div>
+    </div>
+    <p class="caption">Click a row to expand live info for that session — a running elapsed timer, what's waiting for approval, or what errored. Use the arrow icon to jump to that pane, or the pin to make a session always drive the menu bar icon.</p>
+  </section>
+
+  <footer>Static prototype — feedback loops back into DESIGN.md before this gets built for real.</footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const ICONS = {
+    pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v8M8 10l4 4 4-4M7 10h10l-1.5 3h-7z"/><path d="M12 14v8"/></svg>',
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l6 6L20 6"/></svg>',
+    x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 5l14 14M19 5L5 19"/></svg>',
+    chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
+    focus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg>'
+  };
+
+  const STATE_LABEL = { idle: 'Idle', working: 'Working', waiting: 'Waiting', error: 'Error' };
+  const PRIORITY = { waiting: 3, error: 2, working: 1, idle: 0 };
+  const NOW = Date.now();
+
+  function relTime(ts) {
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    return `${Math.floor(m / 60)}h ago`;
+  }
+  function elapsed(ts) {
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    const m = Math.floor(s / 60);
+    return `${m}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  let sessions = [
+    { id: 'finance-app', name: 'finance-app', cwd: '~/Desktop/test/finance-app', state: 'waiting', pinned: true,
+      pending: { tool: 'Bash', detail: 'rm -rf dist/ && npm run build' } },
+    { id: 'session-pet', name: 'session-pet', cwd: '~/Desktop/test/session-pet', state: 'working', pinned: false,
+      currentTool: 'Edit', startedAt: NOW - 47000,
+      activity: ['Read mockup.html', 'Read DESIGN.md', 'Editing CSS'] },
+    { id: 'subtitle-extension', name: 'subtitle-extension', cwd: '~/Desktop/test/subtitle-extension', state: 'idle', pinned: false,
+      lastActiveAt: NOW - 14 * 60000 },
+    { id: 'test-root', name: 'test', cwd: '~/Desktop/test', state: 'error', pinned: false,
+      errorMsg: 'Build failed: Cannot find module "esbuild"' }
+  ];
+  let expandedId = null;
+
+  // Robot-face icon: rounded-rect head + circle LED eyes + antenna + side
+  // ears — plain primitives (rects/circles/one line), the simplest possible
+  // shape language. Ears, antenna stem, face panel are fixed anatomy. Head
+  // fill + antenna-tip color + eye size/shape vary by state.
+  function botSVG(extraClass) {
+    return `<svg class="bot-pet ${extraClass}" viewBox="0 0 100 100">
+      <line class="bot-antenna-stem" x1="50" y1="6" x2="50" y2="18" stroke-width="3" stroke-linecap="round"/>
+      <circle class="bot-beacon" cx="50" cy="6" r="4.5"/>
+      <circle class="bot-antenna-tip" cx="50" cy="6" r="4.5"/>
+      <rect class="bot-ear" x="4" y="40" width="12" height="20" rx="6"/>
+      <rect class="bot-ear" x="84" y="40" width="12" height="20" rx="6"/>
+      <rect class="bot-head" x="14" y="18" width="72" height="62" rx="18"/>
+      <rect class="bot-panel" x="26" y="40" width="48" height="30" rx="10"/>
+      <g class="bot-eyes bot-eyes-idle">
+        <circle cx="36" cy="55" r="4"/>
+        <circle cx="64" cy="55" r="4"/>
+      </g>
+      <g class="bot-eyes bot-eyes-working">
+        <circle cx="36" cy="55" r="5.5"/>
+        <circle cx="64" cy="55" r="5.5"/>
+      </g>
+      <g class="bot-eyes bot-eyes-waiting">
+        <circle cx="36" cy="55" r="7.5"/>
+        <circle cx="64" cy="55" r="7.5"/>
+        <circle class="bot-pupil" cx="36" cy="55" r="2.6"/>
+        <circle class="bot-pupil" cx="64" cy="55" r="2.6"/>
+      </g>
+      <g class="bot-eyes bot-eyes-error">
+        <rect x="30" y="53.5" width="12" height="3" rx="1.5"/>
+        <rect x="58" y="53.5" width="12" height="3" rx="1.5"/>
+      </g>
+      <circle class="bot-badge" cx="80" cy="8" r="7"/>
+    </svg>`;
+  }
+
+  document.querySelectorAll('.pet-slot').forEach(el => {
+    el.innerHTML = botSVG('showcase-pet state-' + el.dataset.pet);
+  });
+
+  function buildDetail(s) {
+    if (s.state === 'waiting') {
+      return `
+        <div class="row-detail-label">Wants to run</div>
+        <span class="row-detail-tool">${s.pending.tool}</span>
+        <div class="row-detail-code">${s.pending.detail}</div>
+        <div class="row-detail-buttons">
+          <button class="btn-text approve" data-action="approve" data-id="${s.id}">${ICONS.check} Approve</button>
+          <button class="btn-text deny" data-action="deny" data-id="${s.id}">${ICONS.x} Deny</button>
+        </div>`;
+    }
+    if (s.state === 'working') {
+      const log = (s.activity || []).slice(-4).map(a => `<div class="log-line">${a}</div>`).join('');
+      return `
+        <div class="row-detail-label">Running</div>
+        <span class="row-detail-tool">${s.currentTool}</span>
+        <div class="row-detail-log">
+          ${log}
+          <div class="log-line log-line-active">${s.currentTool}<span class="dots"><span></span><span></span><span></span></span></div>
+        </div>
+        <div class="row-detail-live"><span class="live-dot"></span> Elapsed <span data-elapsed="${s.id}">${elapsed(s.startedAt)}</span></div>`;
+    }
+    if (s.state === 'error') {
+      return `
+        <div class="row-detail-label">Error</div>
+        <div class="row-detail-code" style="color:var(--clay)">${s.errorMsg}</div>
+        <div class="row-detail-buttons">
+          <button class="btn-text approve" data-action="retry" data-id="${s.id}">${ICONS.check} Retry</button>
+          <button class="btn-text deny" data-action="dismiss" data-id="${s.id}">${ICONS.x} Dismiss</button>
+        </div>`;
+    }
+    return `
+      <div class="row-detail-label">Status</div>
+      <div class="row-detail-idle">No activity — idle for ${relTime(s.lastActiveAt)}.</div>`;
+  }
+
+  function aggregateState() {
+    const pinned = sessions.find(s => s.pinned);
+    if (pinned) return { state: pinned.state, via: pinned.name };
+    const top = [...sessions].sort((a, b) => PRIORITY[b.state] - PRIORITY[a.state])[0];
+    return { state: top.state, via: null };
+  }
+
+  function toast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => t.classList.remove('show'), 1600);
+  }
+
+  function render() {
+    const rows = document.getElementById('rows');
+    rows.innerHTML = '';
+    [...sessions]
+      .sort((a, b) => (b.pinned - a.pinned) || (PRIORITY[b.state] - PRIORITY[a.state]))
+      .forEach(s => {
+        const item = document.createElement('div');
+        item.className = 'row-item';
+
+        const isOpen = expandedId === s.id;
+
+        const detail = isOpen ? `<div class="row-detail">${buildDetail(s)}</div>` : '';
+
+        item.innerHTML = `
+          <div class="row" data-id="${s.id}">
+            ${botSVG('row-pet state-' + s.state)}
+            <div class="row-main">
+              <div class="row-name-line">
+                <span class="row-name">${s.name}</span>
+                <span class="chip" style="--chip-color:var(--${s.state === 'idle' ? 'moss' : s.state === 'working' ? 'leaf' : s.state === 'waiting' ? 'amber' : 'clay'})">${STATE_LABEL[s.state]}</span>
+              </div>
+              <div class="row-cwd">${s.cwd}</div>
+            </div>
+            <div class="row-actions">
+              <button class="icon-btn chevron ${isOpen ? 'expanded' : ''}" data-action="toggle" data-id="${s.id}" aria-label="${isOpen ? 'Hide' : 'Show'} details for ${s.name}">${ICONS.chevron}</button>
+              <button class="icon-btn" data-action="focus" data-id="${s.id}" aria-label="Focus ${s.name}">${ICONS.focus}</button>
+              <button class="icon-btn pin ${s.pinned ? 'pinned' : ''}" data-action="pin" data-id="${s.id}" aria-label="Pin ${s.name}">${ICONS.pin}</button>
+            </div>
+          </div>
+          ${detail}
+        `;
+        rows.appendChild(item);
+      });
+
+    const agg = aggregateState();
+    document.getElementById('aggPetSlot').innerHTML = botSVG('menubar-pet state-' + agg.state);
+
+    const footer = document.getElementById('footerNote');
+    footer.innerHTML = agg.via
+      ? `Icon shows <strong>${STATE_LABEL[agg.state]}</strong> — pinned to <strong>${agg.via}</strong>, overriding priority.`
+      : `Icon shows <strong>${STATE_LABEL[agg.state]}</strong> — priority: Waiting &gt; Error &gt; Working &gt; Idle.`;
+  }
+
+  document.getElementById('rows').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (btn) {
+      const id = btn.dataset.id;
+      const s = sessions.find(x => x.id === id);
+      if (btn.dataset.action === 'pin') {
+        const wasPinned = s.pinned;
+        sessions.forEach(x => x.pinned = false);
+        s.pinned = !wasPinned;
+        toast(s.pinned ? `Pinned ${s.name}` : `Unpinned ${s.name}`);
+      } else if (btn.dataset.action === 'toggle') {
+        expandedId = expandedId === s.id ? null : s.id;
+      } else if (btn.dataset.action === 'approve') {
+        const tool = s.pending ? s.pending.tool : 'Bash';
+        s.state = 'working';
+        s.currentTool = tool;
+        s.startedAt = Date.now();
+        s.pending = null;
+        expandedId = null;
+        toast(`Approved — running ${tool}`);
+      } else if (btn.dataset.action === 'deny') {
+        s.state = 'idle';
+        s.lastActiveAt = Date.now();
+        s.pending = null;
+        expandedId = null;
+        toast(`Denied — ${s.name} stopped`);
+      } else if (btn.dataset.action === 'retry') {
+        s.state = 'working';
+        s.currentTool = s.currentTool || 'Bash';
+        s.startedAt = Date.now();
+        s.errorMsg = null;
+        expandedId = null;
+        toast(`Retrying — running ${s.currentTool}`);
+      } else if (btn.dataset.action === 'dismiss') {
+        s.state = 'idle';
+        s.lastActiveAt = Date.now();
+        s.errorMsg = null;
+        expandedId = null;
+        toast(`Dismissed — ${s.name} idle`);
+      } else if (btn.dataset.action === 'focus') {
+        toast(`Focused ${s.name} in Terminal`);
+      }
+      render();
+      return;
+    }
+    const row = e.target.closest('.row');
+    if (row) {
+      const s = sessions.find(x => x.id === row.dataset.id);
+      expandedId = expandedId === s.id ? null : s.id;
+      render();
+    }
+  });
+
+  document.getElementById('menubarPet').addEventListener('click', () => {
+    const dd = document.getElementById('dropdown');
+    dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+  });
+
+  render();
+
+  function tick() {
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+    document.querySelectorAll('[data-elapsed]').forEach(el => {
+      const s = sessions.find(x => x.id === el.dataset.elapsed);
+      if (s && s.state === 'working') el.textContent = elapsed(s.startedAt);
+    });
+  }
+  tick();
+  setInterval(tick, 1000);
+
+  const FAKE_ACTIVITY = [
+    'Reading DESIGN.md', 'Editing mockup.html', 'Running lint', 'Checking diff',
+    'Writing tests', 'Grepping for usages', 'Formatting output', 'Reading CSS rules',
+  ];
+  setInterval(() => {
+    const s = sessions.find(x => x.id === expandedId);
+    if (!s || s.state !== 'working') return;
+    s.activity = s.activity || [];
+    let next;
+    do { next = FAKE_ACTIVITY[Math.floor(Math.random() * FAKE_ACTIVITY.length)]; }
+    while (next === s.activity[s.activity.length - 1]);
+    s.activity.push(next);
+    s.currentTool = next.split(' ')[0] === 'Editing' ? 'Edit' : next.split(' ')[0] === 'Running' ? 'Bash' : 'Read';
+    render();
+  }, 3500);
+</script>
