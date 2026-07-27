@@ -513,7 +513,15 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Diff preview
 
-    private let DIFF_LINE_CAP = 800 // full LCS diff is O(n*m) — skip it past this and just show new content
+    private static let DIFF_LINE_CAP = 800 // full LCS diff is O(n*m) — skip it past this and just show new content
+
+    // RowView calls diffPreview(for:) straight from `body` — SwiftUI
+    // re-evaluates that body on every hover/publish tick, not just when the
+    // tool_input actually changes, so without a cache this O(n*m) LCS reran
+    // every single render of an expanded "waiting" row. Keyed on the input
+    // content itself, not just session_id, so a genuinely new diff (next
+    // tool call on the same session) still recomputes.
+    private var diffCache: [String: (key: String, diff: DiffPreview?)] = [:]
 
     /// Edit: diffs old_string/new_string directly. Write: diffs the file's
     /// current on-disk content (still pre-edit — this only ever renders
@@ -524,6 +532,19 @@ final class SessionStore: ObservableObject {
     /// to plain toolDetail.
     func diffPreview(for session: SessionStatus) -> DiffPreview? {
         guard let input = session.tool_input else { return nil }
+        let cacheKey = [
+            session.tool ?? "", input.file_path ?? "", input.old_string ?? "",
+            input.new_string ?? "", input.content ?? "", input.new_source ?? "",
+        ].joined(separator: "\u{1}")
+        if let cached = diffCache[session.session_id], cached.key == cacheKey {
+            return cached.diff
+        }
+        let result = Self.computeDiffPreview(session: session, input: input)
+        diffCache[session.session_id] = (cacheKey, result)
+        return result
+    }
+
+    private static func computeDiffPreview(session: SessionStatus, input: SessionStatus.ToolInput) -> DiffPreview? {
         let old: String
         let new: String
         switch session.tool {
@@ -826,7 +847,7 @@ final class SessionStore: ObservableObject {
     /// not just that the pane technically still exists on the tmux server.
     /// Non-tmux sessions can't be confirmed alive at all, so they age out
     /// past a time threshold instead.
-    func liveSessions(paneMap: [String: PaneInfo], attachedSessions: Set<String>) async -> [SessionStatus] {
+    func liveSessions(rawSessions: [(status: SessionStatus, file: String)], paneMap: [String: PaneInfo], attachedSessions: Set<String>) async -> [SessionStatus] {
         let fm = FileManager.default
         let now = Int(Date().timeIntervalSince1970)
         var kept: [(status: SessionStatus, file: String)] = []
@@ -835,7 +856,7 @@ final class SessionStore: ObservableObject {
         // (a subagent shares its parent's tmux_pane, so without this filter
         // the pane-reuse dedup could delete one of parent/subagent thinking
         // it found a duplicate occupant of the same pane).
-        for (rawStatus, file) in readSessions() where rawStatus.agent_id == nil {
+        for (rawStatus, file) in rawSessions where rawStatus.agent_id == nil {
             var status = rawStatus
             if status.state == "waiting" {
                 // Once the dialog clears (answered directly in the terminal
@@ -891,11 +912,11 @@ final class SessionStore: ObservableObject {
     /// session_id. Dropped if stale (SUBAGENT_STALE_SECONDS — no clean
     /// "done" event exists, see comment above) or orphaned (parent session
     /// no longer live, e.g. its window closed).
-    func liveSubagents(mainSessionIds: Set<String>) -> [String: [SessionStatus]] {
+    func liveSubagents(rawSessions: [(status: SessionStatus, file: String)], mainSessionIds: Set<String>) -> [String: [SessionStatus]] {
         let fm = FileManager.default
         let now = Int(Date().timeIntervalSince1970)
         var bySession: [String: [SessionStatus]] = [:]
-        for (status, file) in readSessions() where status.agent_id != nil {
+        for (status, file) in rawSessions where status.agent_id != nil {
             let stale = (now - status.updated_at) >= SUBAGENT_STALE_SECONDS
             let orphan = !mainSessionIds.contains(status.session_id)
             if stale || orphan {
@@ -911,10 +932,24 @@ final class SessionStore: ObservableObject {
     }
 
     func refresh() async {
-        let paneMap = await panes()
-        let clientPids = await clientPidBySession()
-        let attachedSessions = Set(clientPids.keys)
-        let newSessions = await liveSessions(paneMap: paneMap, attachedSessions: attachedSessions)
+        // Reading the status dir is a local FS stat, not a subprocess — cheap
+        // regardless. But `panes()`/`clientPidBySession()` each fork+exec
+        // tmux, with a whole Pipe/thread/semaphore apparatus around it (see
+        // runShell above). Doing that twice a second forever, even with zero
+        // sessions, was the sustained idle-CPU cost. Read the dir once and
+        // skip both subprocess round trips entirely when there's nothing to
+        // resolve pane/client info for.
+        let rawSessions = readSessions()
+        let paneMap: [String: PaneInfo]
+        let attachedSessions: Set<String>
+        if rawSessions.contains(where: { $0.status.agent_id == nil }) {
+            paneMap = await panes()
+            attachedSessions = Set(await clientPidBySession().keys)
+        } else {
+            paneMap = [:]
+            attachedSessions = []
+        }
+        let newSessions = await liveSessions(rawSessions: rawSessions, paneMap: paneMap, attachedSessions: attachedSessions)
 
         let now = Date()
         for s in newSessions {
@@ -956,6 +991,7 @@ final class SessionStore: ObservableObject {
         }
         let liveIds = Set(sessions.map { $0.session_id })
         customNames = customNames.filter { liveIds.contains($0.key) }
+        diffCache = diffCache.filter { liveIds.contains($0.key) }
 
         var newParsed: [String: ParsedPrompt] = [:]
         for s in sessions where s.state == "waiting" && s.tool == "AskUserQuestion" {
@@ -965,7 +1001,7 @@ final class SessionStore: ObservableObject {
         }
         parsedPrompts = newParsed
 
-        subagentsBySession = liveSubagents(mainSessionIds: Set(sessions.map { $0.session_id }))
+        subagentsBySession = liveSubagents(rawSessions: rawSessions, mainSessionIds: Set(sessions.map { $0.session_id }))
         if let expandedSub = expandedSubagentId,
            !subagentsBySession.values.contains(where: { $0.contains { $0.id == expandedSub } }) {
             expandedSubagentId = nil

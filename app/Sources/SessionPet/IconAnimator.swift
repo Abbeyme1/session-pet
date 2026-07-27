@@ -31,8 +31,23 @@ final class IconAnimator: ObservableObject {
     // stuck when competing with something else CPU/GPU-heavy (e.g. fullscreen
     // video). Skipping the render when nothing actually moved is a pure
     // no-op fix — it changes zero visible frames, only the redundant ones.
+    //
+    // But "working"/"waiting" phases (pulseScale, pupilOffset) are continuous
+    // sine functions of `elapsed` — a new, distinct Double basically every
+    // tick — so `phase != lastRenderedPhase` is true on nearly every 80ms
+    // tick for as long as any session is active, defeating the skip above
+    // entirely. Caught live via `sample`: ImageRenderer was a real, sustained
+    // hot path the whole time a session was working, not just at launch.
+    // `renderMinInterval` throttles the actual expensive render call to a
+    // rate still smooth for a 20px pulsing/oscillating icon, independent of
+    // the 80ms tick — which stays fast so the idle blink (needs ~0.11s
+    // precision) is unaffected. State *transitions* always render immediately
+    // so e.g. working -> idle still feels instant, never delayed up to
+    // renderMinInterval.
+    private let renderMinInterval: TimeInterval = 0.15
     private var lastRenderedState: String = ""
     private var lastRenderedPhase: IconPhase = .resting
+    private var lastRenderWallClock: Date = .distantPast
 
     init(store: SessionStore) {
         self.store = store
@@ -50,8 +65,12 @@ final class IconAnimator: ObservableObject {
         let idleSeconds = store.aggregateIdleSinceDate.map { Date().timeIntervalSince($0) } ?? 0
         let phase = computePhase(state: state, elapsed: elapsed, idleSeconds: idleSeconds)
         guard state != lastRenderedState || phase != lastRenderedPhase else { return }
+        let now = Date()
+        let isStateChange = state != lastRenderedState
+        guard isStateChange || now.timeIntervalSince(lastRenderWallClock) >= renderMinInterval else { return }
         lastRenderedState = state
         lastRenderedPhase = phase
+        lastRenderWallClock = now
         image = Self.render(state: state, phase: phase, displaySize: displaySize)
     }
 
@@ -67,7 +86,12 @@ final class IconAnimator: ObservableObject {
         let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let view = PetIcon(state: state, size: referenceSize, phase: phase, forceDark: isDark, zzzLayout: .sideCorner)
         let renderer = ImageRenderer(content: view)
-        renderer.scale = 4 // supersample — clean source detail for the downscale below
+        // 2x is standard Retina density for this same 26pt view — the
+        // thin-shape concern above was about rendering at a smaller POINT
+        // size (fewer, thinner source pixels), not about this supersample
+        // factor; 4x was never verified as the minimum that looks right, and
+        // cutting it to 2x is 4x fewer pixels to rasterize per frame.
+        renderer.scale = 2
         renderer.isOpaque = false
         guard let sourceImage = renderer.nsImage else {
             return NSImage(size: NSSize(width: displaySize, height: displaySize))

@@ -43,7 +43,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
 /// dropdown programmatically (see NotificationDelegate) — `MenuBarExtra` has
 /// no public API for that pre-macOS 14, and this package targets macOS 13.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let settings = SettingsStore()
     private(set) var store: SessionStore!
 
@@ -93,17 +93,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.statusItem.button?.image = image
         }
 
-        let hosting = NSHostingController(rootView: MenuContentView(store: store, onOpenSettings: { [weak self] in self?.openSettings() }))
-        // Without this, NSPopover sizes itself once at creation and never
-        // tracks SwiftUI content changes afterward — a long Bash command or
-        // an expanded diff just gets clipped at the original height instead
-        // of the popover growing to fit. `.preferredContentSize` makes the
-        // hosting controller keep `preferredContentSize` in sync with
-        // SwiftUI's ideal size, which NSPopover observes and resizes to.
-        hosting.sizingOptions = [.preferredContentSize]
         popover = NSPopover()
         popover.behavior = .transient
-        popover.contentViewController = hosting
+        popover.delegate = self
+        // contentViewController is built lazily on first show (see
+        // makeHostingControllerIfNeeded) and torn down again on close (see
+        // popoverDidClose) rather than created once here and left wired up
+        // for the app's whole lifetime. A SwiftUI hosting view keeps
+        // reacting to @Published changes (re-diffing every row, including
+        // PacmanLoader's animation and RowView's diff preview) as long as
+        // it's loaded, whether or not the popover is actually visible —
+        // caught live: CPU usage jumped and stayed elevated the moment the
+        // dropdown was opened once, never dropping back down even after
+        // closing it.
 
         // Not tied to any view's lifecycle — fires whether or not the
         // Settings window has ever been opened, unlike the old .onChange
@@ -158,8 +160,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Rebuilds the hosting controller fresh each time the dropdown opens —
+    /// see the note at `popover.delegate = self` above for why it isn't
+    /// just created once and left alive.
+    private func makeHostingControllerIfNeeded() {
+        guard popover.contentViewController == nil else { return }
+        let hosting = NSHostingController(rootView: MenuContentView(store: store, onOpenSettings: { [weak self] in self?.openSettings() }))
+        // Without this, NSPopover sizes itself once at creation and never
+        // tracks SwiftUI content changes afterward — a long Bash command or
+        // an expanded diff just gets clipped at the original height instead
+        // of the popover growing to fit. `.preferredContentSize` makes the
+        // hosting controller keep `preferredContentSize` in sync with
+        // SwiftUI's ideal size, which NSPopover observes and resizes to.
+        hosting.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = hosting
+    }
+
+    /// Releases the SwiftUI content the instant the dropdown closes, so it
+    /// stops observing `store` (and paying render cost) while hidden.
+    func popoverDidClose(_ notification: Notification) {
+        popover.contentViewController = nil
+    }
+
     func showPopover(expandingSessionId sessionId: String?) {
         if let sessionId { store.expandedId = sessionId }
+        makeHostingControllerIfNeeded()
         guard let button = statusItem.button else { return }
         NSApp.activate(ignoringOtherApps: true)
         // NSApp.activate is async, and a single run-loop-tick defer wasn't
