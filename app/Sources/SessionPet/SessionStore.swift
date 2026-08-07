@@ -188,7 +188,8 @@ let SUBAGENT_STALE_SECONDS = 90
 // for <domain>") — fine since we only ever send the digit, never match text.
 // Read verified via a real user-pasted dialog — "1. Yes / 2. Yes, allow
 // reading from <dir>/ during this session / 3. No", identical shape.
-let SAFE_APPROVE_TOOLS: Set<String> = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "Read"]
+// WebSearch confirmed same 1/2/3 shape too — network-access tool like WebFetch.
+let SAFE_APPROVE_TOOLS: Set<String> = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "Read", "WebSearch"]
 
 // AskUserQuestion is a genuinely different interaction, not a whitelist
 // entry: options are dynamic (not fixed 1/2/3) and it's multi-step (a
