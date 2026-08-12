@@ -175,6 +175,14 @@ let WAITING_WATCHDOG_STALE_SECONDS = 6 * 60 // fallback only if pane can't be re
 // not idle-for-tens-of-minutes like a real terminal session might.
 let SUBAGENT_STALE_SECONDS = 90
 
+// Right when UserPromptSubmit/PreToolUse writes "working", claude's TUI
+// hasn't drawn its spinner line yet — a few seconds of real UI lag, not a
+// bug. Trusting paneShowsActiveSpinner's absence instantly showed "idle"
+// for the first few seconds of every single turn, a regression caught live
+// the moment this shipped. Only trust "no spinner" once the hook itself has
+// gone quiet for a while — i.e. this is genuinely stuck, not just new.
+let WORKING_SPINNER_GRACE_SECONDS = 6
+
 // Only tools empirically verified to show a plain numbered "1. Yes / 2. Yes
 // always / 3. No" dialog get remote Approve/Deny. AskUserQuestion (and any
 // other tool showing custom multi-choice options) is NOT safe here — "1"/"3"
@@ -238,6 +246,7 @@ final class SessionStore: ObservableObject {
     let statusDir = ("~/.claude/session-pet/status" as NSString).expandingTildeInPath
     let tmuxPath = resolveTmuxPath()
     private var timer: Timer?
+    private var reapTimer: Timer?
     private var workingSince: [String: Date] = [:] // session_id -> when it entered "working"
     private var idleSinceMap: [String: Date] = [:] // session_id -> when it entered "idle" (for the sleep-after-N-seconds icon animation)
     private var aggregateIdleSince: Date? = nil // same, for the menu bar's aggregate icon
@@ -256,8 +265,15 @@ final class SessionStore: ObservableObject {
     init(settings: SettingsStore) {
         self.settings = settings
         Task { @MainActor in await self.refresh() }
+        Task { @MainActor in await self.reapStaleTmuxSessions() }
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
+        }
+        // Reaping is a heavier, less time-critical sweep (tmux list-sessions +
+        // ps + potential kill-session calls) — every 5 minutes is plenty, no
+        // reason to pay that cost on the 1s refresh cadence.
+        reapTimer = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.reapStaleTmuxSessions() }
         }
     }
 
@@ -312,12 +328,23 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// A session's own hook-reported state, bumped up if any of its live
+    /// subagents outrank it (e.g. main session idle between tool calls
+    /// while a Task-spawned subagent is still working) — a subagent has no
+    /// clean "done" signal back to its parent, so the parent's own state
+    /// can't be trusted alone to say nothing's happening.
+    func effectiveState(for session: SessionStatus) -> String {
+        let subs = subagentsBySession[session.session_id] ?? []
+        return ([session] + subs).max { (priority[$0.state] ?? 0) < (priority[$1.state] ?? 0) }?.state ?? session.state
+    }
+
     var aggregateState: String {
         let pinned = sessions.filter { pinnedIds.contains($0.session_id) }
-        if let winner = pinned.max(by: { (priority[$0.state] ?? 0) < (priority[$1.state] ?? 0) }) {
-            return winner.state
+        if let winner = pinned.max(by: { (priority[effectiveState(for: $0)] ?? 0) < (priority[effectiveState(for: $1)] ?? 0) }) {
+            return effectiveState(for: winner)
         }
-        return sessions.max { (priority[$0.state] ?? 0) < (priority[$1.state] ?? 0) }?.state ?? "idle"
+        guard let winner = sessions.max(by: { (priority[effectiveState(for: $0)] ?? 0) < (priority[effectiveState(for: $1)] ?? 0) }) else { return "idle" }
+        return effectiveState(for: winner)
     }
 
     func elapsed(for session: SessionStatus) -> String? {
@@ -332,7 +359,7 @@ final class SessionStore: ObservableObject {
     /// waits real idle time, not however long a session happened to be
     /// working/waiting before it went idle.
     func idleSince(for session: SessionStatus) -> Date? {
-        guard session.state == "idle" else { return nil }
+        guard effectiveState(for: session) == "idle" else { return nil }
         return idleSinceMap[session.session_id]
     }
 
@@ -433,6 +460,28 @@ final class SessionStore: ObservableObject {
         return table
     }
 
+    /// Ground truth for "is this pane actually running claude right now."
+    /// Pane/client attachment alone can't tell — a pane whose `claude`
+    /// process got killed abruptly (kill -9, crash, force-quit a tab that
+    /// tmux then reattaches to a bare shell) stays attached forever, so
+    /// liveSessions()'s attachment check alone would leave the last
+    /// hook-written state (e.g. "working") frozen with nothing left to ever
+    /// correct it — no Stop event fires, no timeout covers tmux panes.
+    /// Walk the pane shell's descendants for a live `claude` process instead
+    /// of trusting the stale state.
+    func hasLiveClaudeProcess(panePid: Int32, table: [Int32: ProcInfo]) -> Bool {
+        var childrenByParent: [Int32: [Int32]] = [:]
+        for (pid, info) in table { childrenByParent[info.ppid, default: []].append(pid) }
+        var stack = [panePid]
+        var visited: Set<Int32> = []
+        while let pid = stack.popLast() {
+            guard visited.insert(pid).inserted else { continue }
+            if let info = table[pid], info.comm.contains("claude") { return true }
+            stack.append(contentsOf: childrenByParent[pid] ?? [])
+        }
+        return false
+    }
+
     /// Walks up the process tree from the tmux CLIENT (not the pane's shell
     /// — that just parents back to the detached tmux server) to find which
     /// app is actually displaying the terminal: Terminal.app, iTerm2, VS
@@ -510,6 +559,96 @@ final class SessionStore: ObservableObject {
     func sendDeny(_ paneId: String) async {
         await runShellAsync(tmuxPath, ["send-keys", "-t", paneId, "3", "Enter"])
         expandedId = nil
+    }
+
+    // MARK: - Reaping stale tmux sessions
+
+    // The ~/.zshrc wrapper names every session "claude-$$" (the invoking
+    // shell's PID) and tmux runs with `destroy-unattached off` (needed so a
+    // deliberate prefix-d detach survives). Closing the terminal just
+    // detaches — it doesn't kill the session, and since the shell that
+    // created it is gone with the window, that PID-named session can never
+    // legitimately be reattached by anyone. Nothing else ever reaps it:
+    // liveSessions() only deletes the now-orphaned *status file*, not the
+    // tmux session or the claude process (and its MCP server children)
+    // still running underneath it. Left alone, every closed terminal tab
+    // leaks a claude process forever — caught live as 69 detached sessions
+    // some 13 days old, ~250 stray MCP subprocess descendants, and a
+    // machine pushed to ~36GB of swap.
+    let DETACHED_REAP_SECONDS = 30 * 60
+
+    struct TmuxSessionInfo {
+        let name: String
+        let attached: Bool
+        let lastActivity: Int // tmux's own #{session_activity} clock
+    }
+
+    func allClaudeTmuxSessions() async -> [TmuxSessionInfo] {
+        let out = await runShellAsync(tmuxPath, ["list-sessions", "-F", "#{session_name} #{session_attached} #{session_activity}"])
+        var result: [TmuxSessionInfo] = []
+        for line in out.split(separator: "\n") {
+            let parts = line.split(separator: " ")
+            guard parts.count == 3, parts[0].hasPrefix("claude-"), let activity = Int(parts[2]) else { continue }
+            result.append(TmuxSessionInfo(name: String(parts[0]), attached: parts[1] != "0", lastActivity: activity))
+        }
+        return result
+    }
+
+    /// Kills every descendant of `rootPid`, not just the pane's direct
+    /// process. MCP watchdog processes (e.g. chrome-devtools-mcp) double-fork
+    /// to survive their parent dying, so `tmux kill-session`'s SIGHUP to the
+    /// pane alone leaves them running — this walks the full tree itself.
+    /// SIGTERM first, SIGKILL any survivor after a grace period, same
+    /// escalation as runShell's own timeout handling above.
+    private func killProcessTree(rootPid: Int32, table: [Int32: ProcInfo]) async {
+        var childrenByParent: [Int32: [Int32]] = [:]
+        for (pid, info) in table { childrenByParent[info.ppid, default: []].append(pid) }
+        var pids: [Int32] = []
+        var stack = [rootPid]
+        var visited: Set<Int32> = []
+        while let pid = stack.popLast() {
+            guard visited.insert(pid).inserted else { continue }
+            pids.append(pid)
+            stack.append(contentsOf: childrenByParent[pid] ?? [])
+        }
+        for pid in pids { kill(pid, SIGTERM) }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        for pid in pids where kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+    }
+
+    /// Kills any "claude-*" tmux session that's unattached AND has had no
+    /// pane activity for DETACHED_REAP_SECONDS, plus its full process tree
+    /// and any status file(s) still pointing at it. Uses tmux's own
+    /// #{session_activity} timestamp rather than tracking "since when did we
+    /// notice this was detached" ourselves — so a session that was already
+    /// stale for days before this code ever ran gets reaped the first time
+    /// it's checked, not 30 minutes after the app happens to observe it.
+    func reapStaleTmuxSessions() async {
+        let sessions = await allClaudeTmuxSessions()
+        let now = Int(Date().timeIntervalSince1970)
+        let staleNames = Set(sessions.filter { !$0.attached && (now - $0.lastActivity) >= DETACHED_REAP_SECONDS }.map { $0.name })
+        guard !staleNames.isEmpty else { return }
+
+        let paneMap = await panes() // pane_id -> (sessionName, pid)
+        let table = await processTable()
+
+        for (_, info) in paneMap where staleNames.contains(info.sessionName) {
+            await killProcessTree(rootPid: info.pid, table: table)
+        }
+        for name in staleNames {
+            await runShellAsync(tmuxPath, ["kill-session", "-t", name])
+        }
+
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: statusDir) else { return }
+        let decoder = JSONDecoder()
+        for file in files where file.hasSuffix(".json") {
+            guard let data = fm.contents(atPath: "\(statusDir)/\(file)"),
+                  let status = try? decoder.decode(SessionStatus.self, from: data),
+                  let pane = status.tmux_pane, let info = paneMap[pane],
+                  staleNames.contains(info.sessionName) else { continue }
+            try? fm.removeItem(atPath: "\(statusDir)/\(file)")
+        }
     }
 
     // MARK: - Diff preview
@@ -653,6 +792,34 @@ final class SessionStore: ObservableObject {
             if let first = rest.first, first.isNumber, rest.contains(".") {
                 return true
             }
+        }
+        return false
+    }
+
+    /// Ground truth for "is claude ACTUALLY working right now," read live
+    /// from the pane — same approach as paneStillShowsPrompt above. Needed
+    /// because interrupting a running tool (Ctrl+C/Esc mid-command) drops
+    /// straight back to claude's own idle prompt without firing ANY hook
+    /// event — no PostToolUseFailure, no Stop exists for a user-initiated
+    /// interrupt — so status-hook.sh never learns the tool stopped and the
+    /// last hook-written "working" state freezes forever, even though the
+    /// process itself is genuinely alive (see hasLiveClaudeProcess) and just
+    /// sitting idle. Verified live against a real interrupted session: the
+    /// input box's bare "❯" prompt renders IDENTICALLY whether idle or
+    /// working, so that alone can't tell them apart — the actual tell is
+    /// the spinner line just above it, e.g. "· Marinating… (1m 41s · ↓ 5.0k
+    /// tokens)", present only while a turn is genuinely in flight and absent
+    /// the instant it's interrupted or finished. The leading glyph itself
+    /// animates frame to frame (caught live: "·" one capture, "✶" the next,
+    /// same session, same turn) — anchoring on it caused a false idle
+    /// reading mid-turn. Match the stable part instead: the "…" before the
+    /// elapsed/token readout in "(...)" that only that status line has.
+    func paneShowsActiveSpinner(_ paneId: String) async -> Bool? {
+        let out = await runShellAsync(tmuxPath, ["capture-pane", "-t", paneId, "-p"])
+        guard !out.isEmpty else { return nil } // pane unreadable — don't guess
+        for line in out.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.contains("…"), trimmed.contains("("), trimmed.hasSuffix(")") { return true }
         }
         return false
     }
@@ -848,7 +1015,7 @@ final class SessionStore: ObservableObject {
     /// not just that the pane technically still exists on the tmux server.
     /// Non-tmux sessions can't be confirmed alive at all, so they age out
     /// past a time threshold instead.
-    func liveSessions(rawSessions: [(status: SessionStatus, file: String)], paneMap: [String: PaneInfo], attachedSessions: Set<String>) async -> [SessionStatus] {
+    func liveSessions(rawSessions: [(status: SessionStatus, file: String)], paneMap: [String: PaneInfo], attachedSessions: Set<String>, processTable: [Int32: ProcInfo] = [:]) async -> [SessionStatus] {
         let fm = FileManager.default
         let now = Int(Date().timeIntervalSince1970)
         var kept: [(status: SessionStatus, file: String)] = []
@@ -878,6 +1045,24 @@ final class SessionStore: ObservableObject {
             let isLive: Bool
             if let pane = status.tmux_pane {
                 isLive = paneMap[pane].map { attachedSessions.contains($0.sessionName) } ?? false
+                // Attachment only proves the pane/window is still open, not
+                // that claude is still running in it — see
+                // hasLiveClaudeProcess. Skip when processTable is empty
+                // (not fetched this tick, see refresh()) so this never
+                // fires on stale/incomplete data.
+                if isLive, status.state != "idle", !processTable.isEmpty,
+                   let info = paneMap[pane], !hasLiveClaudeProcess(panePid: info.pid, table: processTable) {
+                    status.state = "idle"
+                }
+                // Process being alive isn't enough — an interrupted tool
+                // (Ctrl+C/Esc) leaves claude alive but back at its own idle
+                // prompt with no hook ever firing to say so. Read the
+                // spinner ground truth directly; nil (pane unreadable)
+                // means don't guess, leave the hook-driven state alone.
+                if isLive, status.state == "working", (now - status.updated_at) >= WORKING_SPINNER_GRACE_SECONDS,
+                   let activelyWorking = await paneShowsActiveSpinner(pane), !activelyWorking {
+                    status.state = "idle"
+                }
             } else {
                 isLive = (now - status.updated_at) < NON_TMUX_STALE_SECONDS
             }
@@ -943,14 +1128,22 @@ final class SessionStore: ObservableObject {
         let rawSessions = readSessions()
         let paneMap: [String: PaneInfo]
         let attachedSessions: Set<String>
+        var procTable: [Int32: ProcInfo] = [:]
         if rawSessions.contains(where: { $0.status.agent_id == nil }) {
             paneMap = await panes()
             attachedSessions = Set(await clientPidBySession().keys)
+            // Only fork+exec `ps` when some tmux session actually claims to
+            // be non-idle — matches the existing idle-CPU discipline above
+            // (skip subprocess round trips whenever there's nothing to
+            // resolve), and this check only ever matters for non-idle state.
+            if rawSessions.contains(where: { $0.status.agent_id == nil && $0.status.state != "idle" }) {
+                procTable = await processTable()
+            }
         } else {
             paneMap = [:]
             attachedSessions = []
         }
-        let newSessions = await liveSessions(rawSessions: rawSessions, paneMap: paneMap, attachedSessions: attachedSessions)
+        let newSessions = await liveSessions(rawSessions: rawSessions, paneMap: paneMap, attachedSessions: attachedSessions, processTable: procTable)
 
         let now = Date()
         for s in newSessions {
